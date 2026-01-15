@@ -1,0 +1,946 @@
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Deploys Schick 33/Elite USB Interface Driver with automatic Eaglesoft version detection.
+
+.DESCRIPTION
+    Production deployment script for Schick sensor drivers that:
+    - Detects Eaglesoft version to determine IOSS (24.20+) vs Legacy install path
+    - Downloads required installers from Backblaze B2 bucket
+    - Performs silent installations of CDR Elite, CDR Patch, AE USB driver, and IOSS
+    - Configures services with proper startup type and recovery options
+    - Validates installation and outputs JSON for HALO ticket integration
+
+.PARAMETER InstallMode
+    Force a specific installation mode. Valid values: 'Auto', 'Legacy', 'IOSS'
+    Default: Auto (detects based on Eaglesoft version)
+
+.PARAMETER SkipPrerequisites
+    Skip prerequisite checks (MSXML, Core Isolation, etc.)
+
+.PARAMETER DownloadOnly
+    Only download installers without running installation
+
+.PARAMETER OutputPath
+    Path for JSON output file. Default: $env:TEMP\SchickDeploy-Results.json
+
+.EXAMPLE
+    .\Deploy-SchickSensor.ps1
+    Auto-detect Eaglesoft version and install appropriate drivers
+
+.EXAMPLE
+    .\Deploy-SchickSensor.ps1 -InstallMode IOSS
+    Force IOSS installation path regardless of detected Eaglesoft version
+
+.EXAMPLE
+    .\Deploy-SchickSensor.ps1 -DownloadOnly
+    Only download installers for manual installation
+
+.NOTES
+    Version:        1.0.0
+    Author:         Automated Deployment Script
+    Requirements:   PowerShell 5.1+, Administrator rights, Internet connectivity
+
+    File Manifest for CDR Elite 5.16:
+    - C:\Program Files (x86)\Schick Technologies\Shared Files\CDRData.dll
+    - C:\Program Files (x86)\Schick Technologies\Shared Files\OMEGADLL.dll
+    - C:\Program Files (x86)\Schick Technologies\Shared Files\CDRImageProcess.dll
+#>
+
+[CmdletBinding()]
+param(
+    [ValidateSet('Auto', 'Legacy', 'IOSS')]
+    [string]$InstallMode = 'Auto',
+
+    [switch]$SkipPrerequisites,
+
+    [switch]$DownloadOnly,
+
+    [string]$OutputPath = "$env:TEMP\SchickDeploy-Results.json"
+)
+
+#region Configuration
+# ============================================================================
+# BACKBLAZE B2 DOWNLOAD URLS - UPDATE THESE WITH YOUR BUCKET URLS
+# ============================================================================
+$Script:Config = @{
+    # Base URL for your Backblaze B2 bucket
+    B2BaseUrl = "https://f005.backblazeb2.com/file/your-bucket-name"
+
+    # Installer filenames (update paths as needed)
+    Installers = @{
+        CDRElite      = "CDR Elite Setup.exe"
+        CDRPatch      = "CDRPatch-2808.msi"
+        AEUSBDriver   = "AEUSBInterface.exe"
+        IOSS          = "IOSS Autorun.exe"
+        MSXML4        = "msxml4-KB2758694-enu.msi"
+    }
+
+    # Installation paths
+    Paths = @{
+        SharedFiles   = "C:\Program Files (x86)\Schick Technologies\Shared Files"
+        SchickBase    = "C:\Program Files (x86)\Schick Technologies"
+        TempDownload  = "$env:TEMP\SchickInstall"
+    }
+
+    # Protected DLLs - DO NOT DELETE during IOSS cleanup
+    ProtectedDLLs = @(
+        "CDRData.dll",
+        "OMEGADLL.dll"
+    )
+
+    # Eaglesoft version threshold for IOSS
+    IOSSMinVersion = [Version]"24.20"
+}
+
+#endregion
+
+#region Logging Functions
+# ============================================================================
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet('Info', 'Warning', 'Error', 'Success')]
+        [string]$Level = 'Info'
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $color = switch ($Level) {
+        'Info'    { 'White' }
+        'Warning' { 'Yellow' }
+        'Error'   { 'Red' }
+        'Success' { 'Green' }
+    }
+
+    $prefix = switch ($Level) {
+        'Info'    { "[*]" }
+        'Warning' { "[!]" }
+        'Error'   { "[X]" }
+        'Success' { "[+]" }
+    }
+
+    Write-Host "$timestamp $prefix $Message" -ForegroundColor $color
+
+    # Add to results log
+    $Script:Results.Log += @{
+        Timestamp = $timestamp
+        Level     = $Level
+        Message   = $Message
+    }
+}
+
+#endregion
+
+#region Detection Functions
+# ============================================================================
+function Get-EaglesoftVersion {
+    <#
+    .SYNOPSIS
+        Detects installed Eaglesoft version from registry
+    #>
+
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\Patterson Dental\Eaglesoft",
+        "HKLM:\SOFTWARE\WOW6432Node\Patterson Dental\Eaglesoft",
+        "HKLM:\SOFTWARE\Patterson\Eaglesoft"
+    )
+
+    foreach ($path in $registryPaths) {
+        if (Test-Path $path) {
+            try {
+                $version = Get-ItemProperty -Path $path -Name "Version" -ErrorAction SilentlyContinue
+                if ($version.Version) {
+                    Write-Log "Found Eaglesoft version $($version.Version) at $path" -Level Info
+                    return [Version]$version.Version
+                }
+
+                # Try alternate property names
+                $displayVersion = Get-ItemProperty -Path $path -Name "DisplayVersion" -ErrorAction SilentlyContinue
+                if ($displayVersion.DisplayVersion) {
+                    Write-Log "Found Eaglesoft DisplayVersion $($displayVersion.DisplayVersion) at $path" -Level Info
+                    return [Version]$displayVersion.DisplayVersion
+                }
+            }
+            catch {
+                Write-Log "Error reading registry at $path`: $_" -Level Warning
+            }
+        }
+    }
+
+    # Fallback: Check installed programs
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($path in $uninstallPaths) {
+        $eaglesoft = Get-ItemProperty $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*Eaglesoft*" } |
+            Select-Object -First 1
+
+        if ($eaglesoft -and $eaglesoft.DisplayVersion) {
+            Write-Log "Found Eaglesoft via uninstall registry: $($eaglesoft.DisplayVersion)" -Level Info
+            try {
+                return [Version]$eaglesoft.DisplayVersion
+            }
+            catch {
+                # Version string might have extra characters
+                $cleanVersion = $eaglesoft.DisplayVersion -replace '[^0-9.]', ''
+                return [Version]$cleanVersion
+            }
+        }
+    }
+
+    Write-Log "Eaglesoft not detected on this system" -Level Warning
+    return $null
+}
+
+function Get-CurrentInstallState {
+    <#
+    .SYNOPSIS
+        Checks current installation state of Schick components
+    #>
+
+    $state = @{
+        SharedFilesExists    = Test-Path $Script:Config.Paths.SharedFiles
+        CDRDataDLL           = $false
+        OMEGADLL             = $false
+        CDRImageProcessDLL   = $false
+        IOSSServiceExists    = $false
+        IOSSServiceRunning   = $false
+        AEUSBDriverInstalled = $false
+        MSXML4Installed      = $false
+        CoreIsolationEnabled = $false
+        RDPSession           = $false
+    }
+
+    # Check DLLs
+    if ($state.SharedFilesExists) {
+        $state.CDRDataDLL = Test-Path (Join-Path $Script:Config.Paths.SharedFiles "CDRData.dll")
+        $state.OMEGADLL = Test-Path (Join-Path $Script:Config.Paths.SharedFiles "OMEGADLL.dll")
+        $state.CDRImageProcessDLL = Test-Path (Join-Path $Script:Config.Paths.SharedFiles "CDRImageProcess.dll")
+    }
+
+    # Check IOSS Service
+    $iossService = Get-Service -Name "IOSS*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($iossService) {
+        $state.IOSSServiceExists = $true
+        $state.IOSSServiceRunning = $iossService.Status -eq 'Running'
+    }
+
+    # Check AE USB Driver
+    $aeDriver = Get-WmiObject Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
+        Where-Object { $_.DeviceName -like "*AE*USB*" -or $_.Description -like "*Schick*" }
+    $state.AEUSBDriverInstalled = $null -ne $aeDriver
+
+    # Check MSXML 4.0
+    $msxml = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -like "*MSXML 4*" }
+    $state.MSXML4Installed = $null -ne $msxml
+
+    # Check Core Isolation (Memory Integrity)
+    try {
+        $hvci = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" -ErrorAction SilentlyContinue
+        $state.CoreIsolationEnabled = $hvci.Enabled -eq 1
+    }
+    catch {
+        $state.CoreIsolationEnabled = $false
+    }
+
+    # Check RDP Session
+    $state.RDPSession = $env:SESSIONNAME -like "RDP*"
+
+    return $state
+}
+
+function Resolve-InstallMode {
+    param([Version]$EaglesoftVersion)
+
+    if ($InstallMode -ne 'Auto') {
+        Write-Log "Install mode forced to: $InstallMode" -Level Info
+        return $InstallMode
+    }
+
+    if ($null -eq $EaglesoftVersion) {
+        Write-Log "No Eaglesoft detected - defaulting to Legacy mode" -Level Warning
+        return 'Legacy'
+    }
+
+    if ($EaglesoftVersion -ge $Script:Config.IOSSMinVersion) {
+        Write-Log "Eaglesoft $EaglesoftVersion >= $($Script:Config.IOSSMinVersion) - selecting IOSS mode" -Level Info
+        return 'IOSS'
+    }
+    else {
+        Write-Log "Eaglesoft $EaglesoftVersion < $($Script:Config.IOSSMinVersion) - selecting Legacy mode" -Level Info
+        return 'Legacy'
+    }
+}
+
+#endregion
+
+#region Prerequisite Functions
+# ============================================================================
+function Test-Prerequisites {
+    <#
+    .SYNOPSIS
+        Validates system prerequisites before installation
+    #>
+
+    $passed = $true
+    $checks = @()
+
+    # Check PowerShell version
+    if ($PSVersionTable.PSVersion.Major -lt 5) {
+        $checks += @{ Name = "PowerShell 5.1+"; Status = "FAIL"; Message = "PowerShell $($PSVersionTable.PSVersion) detected" }
+        $passed = $false
+    }
+    else {
+        $checks += @{ Name = "PowerShell 5.1+"; Status = "PASS"; Message = "PowerShell $($PSVersionTable.PSVersion)" }
+    }
+
+    # Check Administrator
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        $checks += @{ Name = "Administrator"; Status = "FAIL"; Message = "Script must run as Administrator" }
+        $passed = $false
+    }
+    else {
+        $checks += @{ Name = "Administrator"; Status = "PASS"; Message = "Running elevated" }
+    }
+
+    # Check TLS 1.2
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $checks += @{ Name = "TLS 1.2"; Status = "PASS"; Message = "Enabled" }
+    }
+    catch {
+        $checks += @{ Name = "TLS 1.2"; Status = "FAIL"; Message = "Could not enable TLS 1.2" }
+        $passed = $false
+    }
+
+    # Check Internet connectivity
+    try {
+        $null = Invoke-WebRequest -Uri "https://www.google.com" -UseBasicParsing -TimeoutSec 10
+        $checks += @{ Name = "Internet"; Status = "PASS"; Message = "Connected" }
+    }
+    catch {
+        $checks += @{ Name = "Internet"; Status = "FAIL"; Message = "No internet connectivity" }
+        $passed = $false
+    }
+
+    # Check Core Isolation
+    if ($Script:CurrentState.CoreIsolationEnabled) {
+        $checks += @{ Name = "Core Isolation"; Status = "WARN"; Message = "Memory Integrity enabled - may cause driver issues" }
+        Write-Log "WARNING: Core Isolation (Memory Integrity) is enabled. This may prevent USB drivers from loading." -Level Warning
+    }
+    else {
+        $checks += @{ Name = "Core Isolation"; Status = "PASS"; Message = "Memory Integrity disabled" }
+    }
+
+    # Check RDP session
+    if ($Script:CurrentState.RDPSession) {
+        $checks += @{ Name = "RDP Session"; Status = "WARN"; Message = "Running via RDP - USB devices may not be visible" }
+        Write-Log "WARNING: Running via RDP. USB sensor may not be accessible during installation." -Level Warning
+    }
+    else {
+        $checks += @{ Name = "RDP Session"; Status = "PASS"; Message = "Local session" }
+    }
+
+    # Output check results
+    Write-Host "`n=== Prerequisite Checks ===" -ForegroundColor Cyan
+    foreach ($check in $checks) {
+        $color = switch ($check.Status) {
+            'PASS' { 'Green' }
+            'WARN' { 'Yellow' }
+            'FAIL' { 'Red' }
+        }
+        Write-Host "  [$($check.Status)] $($check.Name): $($check.Message)" -ForegroundColor $color
+    }
+    Write-Host ""
+
+    $Script:Results.Prerequisites = $checks
+    return $passed
+}
+
+#endregion
+
+#region Download Functions
+# ============================================================================
+function Initialize-DownloadDirectory {
+    if (-not (Test-Path $Script:Config.Paths.TempDownload)) {
+        New-Item -ItemType Directory -Path $Script:Config.Paths.TempDownload -Force | Out-Null
+        Write-Log "Created temp download directory: $($Script:Config.Paths.TempDownload)" -Level Info
+    }
+}
+
+function Get-Installer {
+    param(
+        [string]$Name,
+        [string]$FileName
+    )
+
+    $url = "$($Script:Config.B2BaseUrl)/$FileName"
+    $destination = Join-Path $Script:Config.Paths.TempDownload $FileName
+
+    # Skip if already downloaded
+    if (Test-Path $destination) {
+        $fileSize = (Get-Item $destination).Length
+        if ($fileSize -gt 0) {
+            Write-Log "$Name already downloaded ($([math]::Round($fileSize/1MB, 2)) MB)" -Level Info
+            return $destination
+        }
+    }
+
+    Write-Log "Downloading $Name from $url" -Level Info
+
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri $url -OutFile $destination -UseBasicParsing -TimeoutSec 300
+
+        $fileSize = (Get-Item $destination).Length
+        Write-Log "Downloaded $Name successfully ($([math]::Round($fileSize/1MB, 2)) MB)" -Level Success
+        return $destination
+    }
+    catch {
+        Write-Log "Failed to download $Name`: $_" -Level Error
+        return $null
+    }
+}
+
+function Get-RequiredInstallers {
+    param([string]$Mode)
+
+    Initialize-DownloadDirectory
+
+    $downloads = @{}
+    $requiredInstallers = @()
+
+    # MSXML 4.0 - required for all installations
+    if (-not $Script:CurrentState.MSXML4Installed) {
+        $requiredInstallers += @{ Name = "MSXML4"; File = $Script:Config.Installers.MSXML4 }
+    }
+
+    # Mode-specific installers
+    switch ($Mode) {
+        'Legacy' {
+            $requiredInstallers += @{ Name = "CDRElite"; File = $Script:Config.Installers.CDRElite }
+            $requiredInstallers += @{ Name = "AEUSBDriver"; File = $Script:Config.Installers.AEUSBDriver }
+        }
+        'IOSS' {
+            $requiredInstallers += @{ Name = "CDRElite"; File = $Script:Config.Installers.CDRElite }
+            $requiredInstallers += @{ Name = "CDRPatch"; File = $Script:Config.Installers.CDRPatch }
+            $requiredInstallers += @{ Name = "IOSS"; File = $Script:Config.Installers.IOSS }
+        }
+    }
+
+    Write-Host "`n=== Downloading Installers ===" -ForegroundColor Cyan
+
+    foreach ($installer in $requiredInstallers) {
+        $path = Get-Installer -Name $installer.Name -FileName $installer.File
+        if ($path) {
+            $downloads[$installer.Name] = $path
+        }
+        else {
+            Write-Log "Missing required installer: $($installer.Name)" -Level Error
+            return $null
+        }
+    }
+
+    return $downloads
+}
+
+#endregion
+
+#region Installation Functions
+# ============================================================================
+function Install-MSXML4 {
+    param([string]$InstallerPath)
+
+    Write-Log "Installing MSXML 4.0 SP3..." -Level Info
+
+    $arguments = "/i `"$InstallerPath`" /qn /norestart"
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+
+    if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+        Write-Log "MSXML 4.0 installed successfully" -Level Success
+        return $true
+    }
+    else {
+        Write-Log "MSXML 4.0 installation failed with exit code: $($process.ExitCode)" -Level Error
+        return $false
+    }
+}
+
+function Install-CDRElite {
+    param([string]$InstallerPath)
+
+    Write-Log "Installing CDR Elite 5.16..." -Level Info
+
+    # InstallShield silent install parameters
+    # Note: May need .iss response file if this prompts - test on lab machine
+    $arguments = "/s /v`"/qn REBOOT=ReallySuppress`""
+
+    $process = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+
+    if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+        Write-Log "CDR Elite installed successfully" -Level Success
+
+        # Verify DLLs were created
+        Start-Sleep -Seconds 2
+        $dllsExist = (Test-Path (Join-Path $Script:Config.Paths.SharedFiles "CDRData.dll")) -and
+                     (Test-Path (Join-Path $Script:Config.Paths.SharedFiles "OMEGADLL.dll"))
+
+        if ($dllsExist) {
+            Write-Log "Verified CDRData.dll and OMEGADLL.dll in Shared Files" -Level Success
+        }
+        else {
+            Write-Log "Warning: Expected DLLs not found in Shared Files folder" -Level Warning
+        }
+
+        return $true
+    }
+    else {
+        Write-Log "CDR Elite installation failed with exit code: $($process.ExitCode)" -Level Error
+        return $false
+    }
+}
+
+function Clear-SharedFilesForIOSS {
+    <#
+    .SYNOPSIS
+        Cleans Shared Files folder for IOSS installation
+        PRESERVES CDRData.dll and OMEGADLL.dll
+        DELETES everything else including CDRImageProcess.dll
+    #>
+
+    Write-Log "Preparing Shared Files folder for IOSS installation..." -Level Info
+
+    $sharedPath = $Script:Config.Paths.SharedFiles
+
+    if (-not (Test-Path $sharedPath)) {
+        Write-Log "Shared Files folder does not exist - skipping cleanup" -Level Warning
+        return $true
+    }
+
+    $files = Get-ChildItem -Path $sharedPath -File -ErrorAction SilentlyContinue
+    $deletedCount = 0
+    $preservedCount = 0
+
+    foreach ($file in $files) {
+        if ($Script:Config.ProtectedDLLs -contains $file.Name) {
+            Write-Log "  PRESERVING: $($file.Name)" -Level Info
+            $preservedCount++
+        }
+        else {
+            try {
+                Remove-Item -Path $file.FullName -Force
+                Write-Log "  DELETED: $($file.Name)" -Level Info
+                $deletedCount++
+            }
+            catch {
+                Write-Log "  FAILED TO DELETE: $($file.Name) - $_" -Level Error
+                return $false
+            }
+        }
+    }
+
+    Write-Log "Cleanup complete: Preserved $preservedCount files, Deleted $deletedCount files" -Level Success
+    return $true
+}
+
+function Install-CDRPatch {
+    param([string]$InstallerPath)
+
+    Write-Log "Installing CDR Patch 2808..." -Level Info
+
+    $arguments = "/i `"$InstallerPath`" /qn /norestart"
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+
+    if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+        Write-Log "CDR Patch installed successfully" -Level Success
+
+        # Verify CDRImageProcess.dll was created
+        Start-Sleep -Seconds 2
+        if (Test-Path (Join-Path $Script:Config.Paths.SharedFiles "CDRImageProcess.dll")) {
+            Write-Log "Verified CDRImageProcess.dll created by patch" -Level Success
+        }
+        else {
+            Write-Log "Warning: CDRImageProcess.dll not found after patch" -Level Warning
+        }
+
+        return $true
+    }
+    else {
+        Write-Log "CDR Patch installation failed with exit code: $($process.ExitCode)" -Level Error
+        return $false
+    }
+}
+
+function Install-AEUSBDriver {
+    param([string]$InstallerPath)
+
+    Write-Log "Installing AE USB Interface driver..." -Level Info
+
+    # Try NSIS-style silent install first
+    $arguments = "/S"
+
+    $process = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+
+    if ($process.ExitCode -eq 0) {
+        Write-Log "AE USB driver installed successfully" -Level Success
+        return $true
+    }
+    else {
+        Write-Log "AE USB driver installation returned exit code: $($process.ExitCode)" -Level Warning
+        # Some driver installers return non-zero even on success
+        return $true
+    }
+}
+
+function Install-IOSS {
+    param([string]$InstallerPath)
+
+    Write-Log "Installing IOSS Imaging Service..." -Level Info
+
+    # Try InstallShield silent parameters
+    $arguments = "/s /v`"/qn REBOOT=ReallySuppress`""
+
+    $process = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+
+    if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+        Write-Log "IOSS installed successfully" -Level Success
+        return $true
+    }
+    else {
+        Write-Log "IOSS installation returned exit code: $($process.ExitCode)" -Level Warning
+        # Continue anyway - service configuration will verify
+        return $true
+    }
+}
+
+function Set-IOSSServiceConfiguration {
+    <#
+    .SYNOPSIS
+        Configures IOSS service with proper settings
+    #>
+
+    Write-Log "Configuring IOSS service..." -Level Info
+
+    $iossService = Get-Service -Name "IOSS*" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    if (-not $iossService) {
+        Write-Log "IOSS service not found - configuration skipped" -Level Error
+        return $false
+    }
+
+    $serviceName = $iossService.Name
+
+    try {
+        # Set delayed auto-start
+        & sc.exe config $serviceName start= delayed-auto | Out-Null
+        Write-Log "  Set startup type: Delayed Auto-Start" -Level Info
+
+        # Set recovery options: restart on first, second, and subsequent failures
+        & sc.exe failure $serviceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+        Write-Log "  Set recovery options: Restart on failure (60s delay)" -Level Info
+
+        # Ensure running as Local System
+        & sc.exe config $serviceName obj= "LocalSystem" | Out-Null
+        Write-Log "  Set logon account: Local System" -Level Info
+
+        # Start the service
+        if ($iossService.Status -ne 'Running') {
+            Start-Service -Name $serviceName -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+
+            $iossService = Get-Service -Name $serviceName
+            if ($iossService.Status -eq 'Running') {
+                Write-Log "  Service started successfully" -Level Success
+            }
+            else {
+                Write-Log "  Service not running - Status: $($iossService.Status)" -Level Warning
+            }
+        }
+        else {
+            Write-Log "  Service already running" -Level Info
+        }
+
+        return $true
+    }
+    catch {
+        Write-Log "Error configuring IOSS service: $_" -Level Error
+        return $false
+    }
+}
+
+#endregion
+
+#region Validation Functions
+# ============================================================================
+function Test-Installation {
+    param([string]$Mode)
+
+    Write-Host "`n=== Validating Installation ===" -ForegroundColor Cyan
+
+    $validation = @{
+        Success = $true
+        Checks  = @()
+    }
+
+    # Check Shared Files directory
+    if (Test-Path $Script:Config.Paths.SharedFiles) {
+        $validation.Checks += @{ Component = "Shared Files Directory"; Status = "PASS" }
+    }
+    else {
+        $validation.Checks += @{ Component = "Shared Files Directory"; Status = "FAIL" }
+        $validation.Success = $false
+    }
+
+    # Check required DLLs
+    $requiredDLLs = @("CDRData.dll", "OMEGADLL.dll")
+    if ($Mode -eq 'IOSS') {
+        $requiredDLLs += "CDRImageProcess.dll"
+    }
+
+    foreach ($dll in $requiredDLLs) {
+        $dllPath = Join-Path $Script:Config.Paths.SharedFiles $dll
+        if (Test-Path $dllPath) {
+            $version = (Get-Item $dllPath).VersionInfo.FileVersion
+            $validation.Checks += @{ Component = $dll; Status = "PASS"; Version = $version }
+        }
+        else {
+            $validation.Checks += @{ Component = $dll; Status = "FAIL"; Version = "Not Found" }
+            $validation.Success = $false
+        }
+    }
+
+    # Check IOSS service (IOSS mode only)
+    if ($Mode -eq 'IOSS') {
+        $iossService = Get-Service -Name "IOSS*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($iossService -and $iossService.Status -eq 'Running') {
+            $validation.Checks += @{ Component = "IOSS Service"; Status = "PASS"; Version = $iossService.Status }
+        }
+        elseif ($iossService) {
+            $validation.Checks += @{ Component = "IOSS Service"; Status = "WARN"; Version = $iossService.Status }
+        }
+        else {
+            $validation.Checks += @{ Component = "IOSS Service"; Status = "FAIL"; Version = "Not Found" }
+            $validation.Success = $false
+        }
+    }
+
+    # Output validation results
+    foreach ($check in $validation.Checks) {
+        $color = switch ($check.Status) {
+            'PASS' { 'Green' }
+            'WARN' { 'Yellow' }
+            'FAIL' { 'Red' }
+        }
+        $versionInfo = if ($check.Version) { " ($($check.Version))" } else { "" }
+        Write-Host "  [$($check.Status)] $($check.Component)$versionInfo" -ForegroundColor $color
+    }
+
+    $Script:Results.Validation = $validation
+    return $validation.Success
+}
+
+#endregion
+
+#region Main Execution
+# ============================================================================
+function Invoke-LegacyInstallation {
+    param([hashtable]$Installers)
+
+    Write-Host "`n=== Legacy Installation Mode ===" -ForegroundColor Cyan
+
+    # Step 1: MSXML 4.0 (if needed)
+    if ($Installers.ContainsKey('MSXML4')) {
+        if (-not (Install-MSXML4 -InstallerPath $Installers.MSXML4)) {
+            return $false
+        }
+    }
+
+    # Step 2: CDR Elite
+    if (-not (Install-CDRElite -InstallerPath $Installers.CDRElite)) {
+        return $false
+    }
+
+    # Step 3: AE USB Driver
+    if (-not (Install-AEUSBDriver -InstallerPath $Installers.AEUSBDriver)) {
+        return $false
+    }
+
+    return $true
+}
+
+function Invoke-IOSSInstallation {
+    param([hashtable]$Installers)
+
+    Write-Host "`n=== IOSS Installation Mode ===" -ForegroundColor Cyan
+
+    # Step 1: MSXML 4.0 (if needed)
+    if ($Installers.ContainsKey('MSXML4')) {
+        if (-not (Install-MSXML4 -InstallerPath $Installers.MSXML4)) {
+            return $false
+        }
+    }
+
+    # Step 2: CDR Elite (installs base DLLs)
+    if (-not (Install-CDRElite -InstallerPath $Installers.CDRElite)) {
+        return $false
+    }
+
+    # Step 3: Clean Shared Files (preserve CDRData.dll and OMEGADLL.dll)
+    if (-not (Clear-SharedFilesForIOSS)) {
+        return $false
+    }
+
+    # Step 4: CDR Patch (creates correct CDRImageProcess.dll)
+    if (-not (Install-CDRPatch -InstallerPath $Installers.CDRPatch)) {
+        return $false
+    }
+
+    # Step 5: IOSS Autorun
+    if (-not (Install-IOSS -InstallerPath $Installers.IOSS)) {
+        return $false
+    }
+
+    # Step 6: Configure IOSS Service
+    if (-not (Set-IOSSServiceConfiguration)) {
+        Write-Log "Service configuration had issues - manual review recommended" -Level Warning
+    }
+
+    return $true
+}
+
+function Export-Results {
+    try {
+        $Script:Results | ConvertTo-Json -Depth 10 | Out-File -FilePath $OutputPath -Encoding UTF8
+        Write-Log "Results exported to: $OutputPath" -Level Info
+    }
+    catch {
+        Write-Log "Failed to export results: $_" -Level Warning
+    }
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+$ErrorActionPreference = 'Stop'
+
+# Initialize results object
+$Script:Results = @{
+    StartTime      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    ComputerName   = $env:COMPUTERNAME
+    Mode           = $null
+    Success        = $false
+    Prerequisites  = @()
+    Validation     = @{}
+    Log            = @()
+}
+
+Write-Host @"
+
+╔═══════════════════════════════════════════════════════════════════╗
+║           Schick Sensor Deployment Script v1.0.0                  ║
+║                                                                   ║
+║  CDR Elite 5.16 + IOSS/Legacy Auto-Detection                      ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+"@ -ForegroundColor Cyan
+
+try {
+    # Enable TLS 1.2
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    # Step 1: Detect current state
+    Write-Host "=== Detecting System State ===" -ForegroundColor Cyan
+    $Script:CurrentState = Get-CurrentInstallState
+
+    # Step 2: Detect Eaglesoft version
+    $eaglesoftVersion = Get-EaglesoftVersion
+    $Script:Results.EaglesoftVersion = if ($eaglesoftVersion) { $eaglesoftVersion.ToString() } else { "Not Detected" }
+
+    # Step 3: Resolve install mode
+    $resolvedMode = Resolve-InstallMode -EaglesoftVersion $eaglesoftVersion
+    $Script:Results.Mode = $resolvedMode
+    Write-Host "`n  Selected Install Mode: $resolvedMode" -ForegroundColor Yellow
+    Write-Host ""
+
+    # Step 4: Check prerequisites
+    if (-not $SkipPrerequisites) {
+        $prereqsPassed = Test-Prerequisites
+        if (-not $prereqsPassed) {
+            Write-Log "Prerequisite checks failed - aborting installation" -Level Error
+            $Script:Results.Success = $false
+            Export-Results
+            exit 1
+        }
+    }
+
+    # Step 5: Download installers
+    $installers = Get-RequiredInstallers -Mode $resolvedMode
+    if (-not $installers) {
+        Write-Log "Failed to download required installers - aborting" -Level Error
+        $Script:Results.Success = $false
+        Export-Results
+        exit 1
+    }
+
+    # Step 6: Download-only mode check
+    if ($DownloadOnly) {
+        Write-Log "Download-only mode - skipping installation" -Level Info
+        Write-Host "`nInstallers downloaded to: $($Script:Config.Paths.TempDownload)" -ForegroundColor Green
+        $Script:Results.Success = $true
+        Export-Results
+        exit 0
+    }
+
+    # Step 7: Run installation
+    $installSuccess = switch ($resolvedMode) {
+        'Legacy' { Invoke-LegacyInstallation -Installers $installers }
+        'IOSS'   { Invoke-IOSSInstallation -Installers $installers }
+    }
+
+    if (-not $installSuccess) {
+        Write-Log "Installation failed" -Level Error
+        $Script:Results.Success = $false
+        Export-Results
+        exit 1
+    }
+
+    # Step 8: Validate installation
+    $validationPassed = Test-Installation -Mode $resolvedMode
+    $Script:Results.Success = $validationPassed
+
+    # Step 9: Final summary
+    Write-Host ""
+    if ($validationPassed) {
+        Write-Host "═══════════════════════════════════════════════════════════════════" -ForegroundColor Green
+        Write-Host "  INSTALLATION COMPLETED SUCCESSFULLY" -ForegroundColor Green
+        Write-Host "═══════════════════════════════════════════════════════════════════" -ForegroundColor Green
+    }
+    else {
+        Write-Host "═══════════════════════════════════════════════════════════════════" -ForegroundColor Yellow
+        Write-Host "  INSTALLATION COMPLETED WITH WARNINGS - Review validation above" -ForegroundColor Yellow
+        Write-Host "═══════════════════════════════════════════════════════════════════" -ForegroundColor Yellow
+    }
+
+    $Script:Results.EndTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Export-Results
+
+    Write-Host "`n  Results exported to: $OutputPath" -ForegroundColor Gray
+    Write-Host ""
+
+    if ($validationPassed) { exit 0 } else { exit 2 }
+}
+catch {
+    Write-Log "Unhandled exception: $_" -Level Error
+    Write-Log $_.ScriptStackTrace -Level Error
+    $Script:Results.Success = $false
+    $Script:Results.Error = $_.ToString()
+    Export-Results
+    exit 1
+}
+
+#endregion
