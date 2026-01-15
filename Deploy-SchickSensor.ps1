@@ -696,6 +696,129 @@ function Set-IOSSServiceConfiguration {
     }
 }
 
+function Reset-USBSensor {
+    <#
+    .SYNOPSIS
+        Programmatically "replugs" the Schick USB sensor by disabling and re-enabling the device.
+        This eliminates the need to physically unplug and replug the sensor.
+    #>
+
+    Write-Log "Resetting USB sensor (simulating unplug/replug)..." -Level Info
+
+    # Search patterns for Schick/AE USB devices
+    $devicePatterns = @(
+        "*Schick*",
+        "*CDR*",
+        "*AE*USB*",
+        "*Dental*Sensor*",
+        "*FTDI*"  # Common USB-serial chip used in dental sensors
+    )
+
+    $foundDevices = @()
+
+    # Find matching USB devices
+    foreach ($pattern in $devicePatterns) {
+        $devices = Get-PnpDevice -FriendlyName $pattern -ErrorAction SilentlyContinue |
+            Where-Object { $_.Class -in @('USB', 'Image', 'Ports', 'HIDClass') }
+
+        if ($devices) {
+            $foundDevices += $devices
+        }
+    }
+
+    # Also search by hardware ID patterns
+    $usbDevices = Get-PnpDevice -Class 'USB', 'Image', 'Ports' -ErrorAction SilentlyContinue
+    foreach ($device in $usbDevices) {
+        $hwIds = (Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue).Data
+        if ($hwIds -match 'VID_0403|VID_20D6|Schick|CDR') {
+            if ($device -notin $foundDevices) {
+                $foundDevices += $device
+            }
+        }
+    }
+
+    if ($foundDevices.Count -eq 0) {
+        Write-Log "No Schick/AE USB devices found to reset" -Level Warning
+        Write-Log "  Note: Device may need physical replug, or sensor not connected" -Level Warning
+        return $false
+    }
+
+    # Remove duplicates
+    $foundDevices = $foundDevices | Select-Object -Unique
+
+    Write-Log "Found $($foundDevices.Count) USB device(s) to reset:" -Level Info
+
+    $resetSuccess = $true
+    foreach ($device in $foundDevices) {
+        Write-Log "  Resetting: $($device.FriendlyName) [$($device.InstanceId)]" -Level Info
+
+        try {
+            # Disable the device
+            Write-Log "    Disabling device..." -Level Info
+            Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+
+            # Wait for device to fully disable
+            Start-Sleep -Seconds 2
+
+            # Re-enable the device
+            Write-Log "    Re-enabling device..." -Level Info
+            Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+
+            # Wait for device to initialize
+            Start-Sleep -Seconds 3
+
+            # Verify device is back online
+            $deviceStatus = Get-PnpDevice -InstanceId $device.InstanceId -ErrorAction SilentlyContinue
+            if ($deviceStatus.Status -eq 'OK') {
+                Write-Log "    Device reset successfully - Status: OK" -Level Success
+            }
+            else {
+                Write-Log "    Device status after reset: $($deviceStatus.Status)" -Level Warning
+            }
+        }
+        catch {
+            Write-Log "    Failed to reset device: $_" -Level Error
+            $resetSuccess = $false
+
+            # Try to re-enable if disable succeeded but enable failed
+            try {
+                Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction SilentlyContinue
+            }
+            catch { }
+        }
+    }
+
+    if ($resetSuccess) {
+        Write-Log "USB sensor reset completed successfully" -Level Success
+    }
+    else {
+        Write-Log "USB sensor reset completed with errors - manual replug may be required" -Level Warning
+    }
+
+    return $resetSuccess
+}
+
+function Reset-USBSensorFallback {
+    <#
+    .SYNOPSIS
+        Fallback method using pnputil/devcon if Disable-PnpDevice is not available
+    #>
+
+    Write-Log "Attempting USB reset via pnputil..." -Level Info
+
+    # Scan for hardware changes (forces re-enumeration)
+    $result = & pnputil.exe /scan-devices 2>&1
+
+    if ($LASTEXITCODE -eq 0) {
+        Write-Log "USB device scan completed - devices re-enumerated" -Level Success
+        return $true
+    }
+    else {
+        Write-Log "pnputil scan failed: $result" -Level Warning
+        return $false
+    }
+}
+
 #endregion
 
 #region Validation Functions
@@ -793,6 +916,14 @@ function Invoke-LegacyInstallation {
         return $false
     }
 
+    # Step 4: Reset USB sensor (simulates unplug/replug)
+    Write-Host "`n=== USB Sensor Reset ===" -ForegroundColor Cyan
+    $resetResult = Reset-USBSensor
+    if (-not $resetResult) {
+        # Try fallback method
+        Reset-USBSensorFallback | Out-Null
+    }
+
     return $true
 }
 
@@ -831,6 +962,14 @@ function Invoke-IOSSInstallation {
     # Step 6: Configure IOSS Service
     if (-not (Set-IOSSServiceConfiguration)) {
         Write-Log "Service configuration had issues - manual review recommended" -Level Warning
+    }
+
+    # Step 7: Reset USB sensor (simulates unplug/replug)
+    Write-Host "`n=== USB Sensor Reset ===" -ForegroundColor Cyan
+    $resetResult = Reset-USBSensor
+    if (-not $resetResult) {
+        # Try fallback method
+        Reset-USBSensorFallback | Out-Null
     }
 
     return $true
