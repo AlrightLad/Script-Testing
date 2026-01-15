@@ -446,6 +446,7 @@ function Get-RequiredInstallers {
     switch ($Mode) {
         'Legacy' {
             $requiredInstallers += "CDRElite"
+            $requiredInstallers += "CDRPatch"      # Creates correct CDRImageProcess.dll v5.15.1877
             $requiredInstallers += "AEUSBDriver"
         }
         'IOSS' {
@@ -525,6 +526,137 @@ function Install-CDRElite {
     else {
         Write-Log "CDR Elite installation failed with exit code: $($process.ExitCode)" -Level Error
         return $false
+    }
+}
+
+function Stop-AutoDetectServer {
+    <#
+    .SYNOPSIS
+        Stops AutoDetectServer.exe if running (required before installation per Patterson docs)
+    #>
+
+    Write-Log "Checking for AutoDetectServer.exe..." -Level Info
+
+    $process = Get-Process -Name "AutoDetectServer" -ErrorAction SilentlyContinue
+    if ($process) {
+        Write-Log "  Stopping AutoDetectServer.exe..." -Level Info
+        try {
+            $process | Stop-Process -Force
+            Start-Sleep -Seconds 2
+            Write-Log "  AutoDetectServer.exe stopped" -Level Success
+        }
+        catch {
+            Write-Log "  Failed to stop AutoDetectServer.exe: $_" -Level Warning
+        }
+    }
+    else {
+        Write-Log "  AutoDetectServer.exe not running" -Level Info
+    }
+}
+
+function Uninstall-LegacyComponents {
+    <#
+    .SYNOPSIS
+        Uninstalls legacy CDR/Schick components before IOSS installation
+        Per Patterson documentation, these must be removed:
+        - CDR Patch-2808
+        - CDR Intra-Oral TWAIN Data Source
+        - CDR Elite USB Driver
+        - CDR USB Remote HS Driver
+        - Schick AE USB Support for CDR
+    #>
+
+    Write-Log "Checking for legacy components to uninstall..." -Level Info
+
+    $legacyProducts = @(
+        "*CDR Patch*",
+        "*CDR Intra-Oral*",
+        "*CDR Elite*",
+        "*CDR USB*",
+        "*Schick AE USB*",
+        "*CDR TWAIN*"
+    )
+
+    $uninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    $foundProducts = @()
+
+    foreach ($path in $uninstallPaths) {
+        foreach ($pattern in $legacyProducts) {
+            $products = Get-ItemProperty $path -ErrorAction SilentlyContinue |
+                Where-Object { $_.DisplayName -like $pattern }
+            if ($products) {
+                $foundProducts += $products
+            }
+        }
+    }
+
+    if ($foundProducts.Count -eq 0) {
+        Write-Log "  No legacy components found" -Level Info
+        return $true
+    }
+
+    Write-Log "  Found $($foundProducts.Count) legacy component(s) to uninstall:" -Level Info
+
+    foreach ($product in $foundProducts) {
+        Write-Log "    - $($product.DisplayName)" -Level Info
+
+        try {
+            $uninstallString = $product.UninstallString
+            if ($uninstallString -match "msiexec") {
+                # MSI uninstall
+                $productCode = $product.PSChildName
+                $arguments = "/x $productCode /qn /norestart"
+                Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -NoNewWindow
+                Write-Log "      Uninstalled via MSI" -Level Success
+            }
+            elseif ($uninstallString) {
+                # EXE uninstall - try silent
+                $uninstallString = $uninstallString -replace '"', ''
+                Start-Process -FilePath $uninstallString -ArgumentList "/S /SILENT /VERYSILENT /NORESTART" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+                Write-Log "      Uninstall attempted" -Level Info
+            }
+        }
+        catch {
+            Write-Log "      Failed to uninstall: $_" -Level Warning
+        }
+    }
+
+    return $true
+}
+
+function Rename-CDRImageProcessDLL {
+    <#
+    .SYNOPSIS
+        Renames CDRImageProcess.dll to CDRImageProcess.dllOLD before patching
+        Per Patterson documentation for Legacy installation path
+    #>
+
+    $dllPath = Join-Path $Script:Config.Paths.SharedFiles "CDRImageProcess.dll"
+    $oldPath = Join-Path $Script:Config.Paths.SharedFiles "CDRImageProcess.dllOLD"
+
+    if (Test-Path $dllPath) {
+        Write-Log "Renaming CDRImageProcess.dll to CDRImageProcess.dllOLD..." -Level Info
+        try {
+            # Remove old backup if exists
+            if (Test-Path $oldPath) {
+                Remove-Item -Path $oldPath -Force
+            }
+            Rename-Item -Path $dllPath -NewName "CDRImageProcess.dllOLD" -Force
+            Write-Log "  Renamed successfully" -Level Success
+            return $true
+        }
+        catch {
+            Write-Log "  Failed to rename: $_" -Level Error
+            return $false
+        }
+    }
+    else {
+        Write-Log "CDRImageProcess.dll not found - skipping rename" -Level Info
+        return $true
     }
 }
 
@@ -819,6 +951,131 @@ function Reset-USBSensorFallback {
     }
 }
 
+function Disable-USBSensorForInstall {
+    <#
+    .SYNOPSIS
+        Disables Schick USB sensor before installation (mimics "disconnect")
+        Per Patterson docs: "Close Eaglesoft and disconnect all Schick equipment"
+        Stores device IDs in script variable for later re-enablement
+    #>
+
+    Write-Log "Checking for connected USB sensors to disable during installation..." -Level Info
+
+    # Search patterns for Schick/AE USB devices
+    $devicePatterns = @(
+        "*Schick*",
+        "*CDR*",
+        "*AE*USB*",
+        "*Dental*Sensor*",
+        "*FTDI*"
+    )
+
+    $Script:DisabledDevices = @()
+
+    # Find matching USB devices
+    foreach ($pattern in $devicePatterns) {
+        $devices = Get-PnpDevice -FriendlyName $pattern -ErrorAction SilentlyContinue |
+            Where-Object { $_.Class -in @('USB', 'Image', 'Ports', 'HIDClass') -and $_.Status -eq 'OK' }
+
+        if ($devices) {
+            $Script:DisabledDevices += $devices
+        }
+    }
+
+    # Also search by hardware ID patterns
+    $usbDevices = Get-PnpDevice -Class 'USB', 'Image', 'Ports' -Status 'OK' -ErrorAction SilentlyContinue
+    foreach ($device in $usbDevices) {
+        $hwIds = (Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue).Data
+        if ($hwIds -match 'VID_0403|VID_20D6|Schick|CDR') {
+            if ($device.InstanceId -notin $Script:DisabledDevices.InstanceId) {
+                $Script:DisabledDevices += $device
+            }
+        }
+    }
+
+    if ($Script:DisabledDevices.Count -eq 0) {
+        Write-Log "  No active USB sensors detected - proceeding with installation" -Level Info
+        return $true
+    }
+
+    # Remove duplicates
+    $Script:DisabledDevices = $Script:DisabledDevices | Select-Object -Unique
+
+    Write-Log "  Found $($Script:DisabledDevices.Count) USB sensor(s) to disable:" -Level Info
+
+    foreach ($device in $Script:DisabledDevices) {
+        Write-Log "    - $($device.FriendlyName)" -Level Info
+
+        try {
+            Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+            Write-Log "      DISABLED (will re-enable after installation)" -Level Success
+        }
+        catch {
+            Write-Log "      Failed to disable: $_" -Level Warning
+            Write-Log "      You may need to physically unplug the sensor" -Level Warning
+        }
+    }
+
+    # Brief pause for devices to fully disable
+    Start-Sleep -Seconds 2
+
+    return $true
+}
+
+function Enable-USBSensorAfterInstall {
+    <#
+    .SYNOPSIS
+        Re-enables USB sensors that were disabled before installation (mimics "reconnect")
+    #>
+
+    if (-not $Script:DisabledDevices -or $Script:DisabledDevices.Count -eq 0) {
+        Write-Log "No devices to re-enable (none were disabled)" -Level Info
+        # Still run a device scan in case sensor was connected during install
+        Reset-USBSensorFallback | Out-Null
+        return $true
+    }
+
+    Write-Log "Re-enabling USB sensors after installation..." -Level Info
+
+    $enableSuccess = $true
+
+    foreach ($device in $Script:DisabledDevices) {
+        Write-Log "  Re-enabling: $($device.FriendlyName)" -Level Info
+
+        try {
+            Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+
+            # Wait for device to initialize
+            Start-Sleep -Seconds 2
+
+            # Verify status
+            $currentDevice = Get-PnpDevice -InstanceId $device.InstanceId -ErrorAction SilentlyContinue
+            if ($currentDevice.Status -eq 'OK') {
+                Write-Log "    Status: OK - Device reconnected successfully" -Level Success
+            }
+            else {
+                Write-Log "    Status: $($currentDevice.Status)" -Level Warning
+            }
+        }
+        catch {
+            Write-Log "    Failed to re-enable: $_" -Level Error
+            $enableSuccess = $false
+        }
+    }
+
+    # Also trigger a device scan for good measure
+    & pnputil.exe /scan-devices 2>&1 | Out-Null
+
+    if ($enableSuccess) {
+        Write-Log "All USB sensors re-enabled successfully" -Level Success
+    }
+    else {
+        Write-Log "Some devices failed to re-enable - may need physical replug" -Level Warning
+    }
+
+    return $enableSuccess
+}
+
 #endregion
 
 #region Validation Functions
@@ -899,6 +1156,13 @@ function Invoke-LegacyInstallation {
 
     Write-Host "`n=== Legacy Installation Mode ===" -ForegroundColor Cyan
 
+    # Step 0a: Stop AutoDetectServer.exe if running
+    Stop-AutoDetectServer
+
+    # Step 0b: Disable USB sensor if connected (per Patterson: "disconnect all Schick equipment")
+    Write-Host "`n=== Pre-Installation: Disconnecting Sensor ===" -ForegroundColor Cyan
+    Disable-USBSensorForInstall
+
     # Step 1: MSXML 4.0 (if needed)
     if ($Installers.ContainsKey('MSXML4')) {
         if (-not (Install-MSXML4 -InstallerPath $Installers.MSXML4)) {
@@ -911,18 +1175,24 @@ function Invoke-LegacyInstallation {
         return $false
     }
 
-    # Step 3: AE USB Driver
+    # Step 3: Rename CDRImageProcess.dll to .dllOLD (per Patterson docs)
+    Rename-CDRImageProcessDLL
+
+    # Step 4: CDR Patch (creates correct CDRImageProcess.dll v5.15.1877)
+    if ($Installers.ContainsKey('CDRPatch')) {
+        if (-not (Install-CDRPatch -InstallerPath $Installers.CDRPatch)) {
+            return $false
+        }
+    }
+
+    # Step 5: AE USB Driver
     if (-not (Install-AEUSBDriver -InstallerPath $Installers.AEUSBDriver)) {
         return $false
     }
 
-    # Step 4: Reset USB sensor (simulates unplug/replug)
-    Write-Host "`n=== USB Sensor Reset ===" -ForegroundColor Cyan
-    $resetResult = Reset-USBSensor
-    if (-not $resetResult) {
-        # Try fallback method
-        Reset-USBSensorFallback | Out-Null
-    }
+    # Step 6: Re-enable USB sensor (per Patterson: reconnect after driver install)
+    Write-Host "`n=== Post-Installation: Reconnecting Sensor ===" -ForegroundColor Cyan
+    Enable-USBSensorAfterInstall
 
     return $true
 }
@@ -932,6 +1202,17 @@ function Invoke-IOSSInstallation {
 
     Write-Host "`n=== IOSS Installation Mode ===" -ForegroundColor Cyan
 
+    # Step 0a: Stop AutoDetectServer.exe if running
+    Stop-AutoDetectServer
+
+    # Step 0b: Disable USB sensor if connected (per Patterson: "Unplug USB cable from Schick remote")
+    Write-Host "`n=== Pre-Installation: Disconnecting Sensor ===" -ForegroundColor Cyan
+    Disable-USBSensorForInstall
+
+    # Step 0c: Uninstall legacy CDR components (required for IOSS per Patterson docs)
+    Write-Host "`n=== Removing Legacy Components ===" -ForegroundColor Cyan
+    Uninstall-LegacyComponents
+
     # Step 1: MSXML 4.0 (if needed)
     if ($Installers.ContainsKey('MSXML4')) {
         if (-not (Install-MSXML4 -InstallerPath $Installers.MSXML4)) {
@@ -939,17 +1220,17 @@ function Invoke-IOSSInstallation {
         }
     }
 
-    # Step 2: CDR Elite (installs base DLLs)
+    # Step 2: CDR Elite (installs base DLLs: CDRData.dll, OMEGADLL.dll)
     if (-not (Install-CDRElite -InstallerPath $Installers.CDRElite)) {
         return $false
     }
 
-    # Step 3: Clean Shared Files (preserve CDRData.dll and OMEGADLL.dll)
+    # Step 3: Clean Shared Files (preserve CDRData.dll and OMEGADLL.dll only)
     if (-not (Clear-SharedFilesForIOSS)) {
         return $false
     }
 
-    # Step 4: CDR Patch (creates correct CDRImageProcess.dll)
+    # Step 4: CDR Patch (creates correct CDRImageProcess.dll v5.15.1877)
     if (-not (Install-CDRPatch -InstallerPath $Installers.CDRPatch)) {
         return $false
     }
@@ -959,18 +1240,14 @@ function Invoke-IOSSInstallation {
         return $false
     }
 
-    # Step 6: Configure IOSS Service
+    # Step 6: Configure IOSS Service (delayed start, recovery options, Local System)
     if (-not (Set-IOSSServiceConfiguration)) {
         Write-Log "Service configuration had issues - manual review recommended" -Level Warning
     }
 
-    # Step 7: Reset USB sensor (simulates unplug/replug)
-    Write-Host "`n=== USB Sensor Reset ===" -ForegroundColor Cyan
-    $resetResult = Reset-USBSensor
-    if (-not $resetResult) {
-        # Try fallback method
-        Reset-USBSensorFallback | Out-Null
-    }
+    # Step 7: Re-enable USB sensor (per Patterson: reconnect after IOSS install)
+    Write-Host "`n=== Post-Installation: Reconnecting Sensor ===" -ForegroundColor Cyan
+    Enable-USBSensorAfterInstall
 
     return $true
 }
