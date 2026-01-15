@@ -61,19 +61,35 @@ param(
 
 #region Configuration
 # ============================================================================
-# BACKBLAZE B2 DOWNLOAD URLS - UPDATE THESE WITH YOUR BUCKET URLS
+# DOWNLOAD URLS - Backblaze B2 + Microsoft
 # ============================================================================
 $Script:Config = @{
-    # Base URL for your Backblaze B2 bucket
-    B2BaseUrl = "https://f005.backblazeb2.com/file/your-bucket-name"
-
-    # Installer filenames (update paths as needed)
-    Installers = @{
-        CDRElite      = "CDR Elite Setup.exe"
-        CDRPatch      = "CDRPatch-2808.msi"
-        AEUSBDriver   = "AEUSBInterface.exe"
-        IOSS          = "IOSS Autorun.exe"
-        MSXML4        = "msxml4-KB2758694-enu.msi"
+    # Full download URLs (different subfolders require full paths)
+    Downloads = @{
+        CDRElite      = @{
+            Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/CDRElite5_16/CDRElite/CDR%20Elite%20Setup.exe"
+            FileName = "CDR Elite Setup.exe"
+        }
+        CDRPatch      = @{
+            Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/CDRElite5_16/CDRElite/Patch/CDRPatch-2808.msi"
+            FileName = "CDRPatch-2808.msi"
+        }
+        AEUSBDriver   = @{
+            Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/AEUSBInterfaceSetup.exe"
+            FileName = "AEUSBInterfaceSetup.exe"
+        }
+        AEUSBFirmware = @{
+            Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/AE_USB_Firmware_Upgrade%5B1%5D.exe"
+            FileName = "AE_USB_Firmware_Upgrade.exe"
+        }
+        IOSS          = @{
+            Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/IOSS_v3.2/IOSS_v3.2/Autorun.exe"
+            FileName = "IOSS_Autorun.exe"
+        }
+        MSXML4        = @{
+            Url      = "https://download.microsoft.com/download/1/E/E/1EE06E22-A56F-4E76-B6F6-E7670B4F8163/msxml4-KB2758694-enu.exe"
+            FileName = "msxml4-KB2758694-enu.exe"
+        }
     }
 
     # Installation paths
@@ -375,12 +391,18 @@ function Initialize-DownloadDirectory {
 
 function Get-Installer {
     param(
-        [string]$Name,
-        [string]$FileName
+        [string]$Name
     )
 
-    $url = "$($Script:Config.B2BaseUrl)/$FileName"
-    $destination = Join-Path $Script:Config.Paths.TempDownload $FileName
+    $installerConfig = $Script:Config.Downloads[$Name]
+    if (-not $installerConfig) {
+        Write-Log "Unknown installer: $Name" -Level Error
+        return $null
+    }
+
+    $url = $installerConfig.Url
+    $fileName = $installerConfig.FileName
+    $destination = Join-Path $Script:Config.Paths.TempDownload $fileName
 
     # Skip if already downloaded
     if (Test-Path $destination) {
@@ -417,31 +439,31 @@ function Get-RequiredInstallers {
 
     # MSXML 4.0 - required for all installations
     if (-not $Script:CurrentState.MSXML4Installed) {
-        $requiredInstallers += @{ Name = "MSXML4"; File = $Script:Config.Installers.MSXML4 }
+        $requiredInstallers += "MSXML4"
     }
 
     # Mode-specific installers
     switch ($Mode) {
         'Legacy' {
-            $requiredInstallers += @{ Name = "CDRElite"; File = $Script:Config.Installers.CDRElite }
-            $requiredInstallers += @{ Name = "AEUSBDriver"; File = $Script:Config.Installers.AEUSBDriver }
+            $requiredInstallers += "CDRElite"
+            $requiredInstallers += "AEUSBDriver"
         }
         'IOSS' {
-            $requiredInstallers += @{ Name = "CDRElite"; File = $Script:Config.Installers.CDRElite }
-            $requiredInstallers += @{ Name = "CDRPatch"; File = $Script:Config.Installers.CDRPatch }
-            $requiredInstallers += @{ Name = "IOSS"; File = $Script:Config.Installers.IOSS }
+            $requiredInstallers += "CDRElite"
+            $requiredInstallers += "CDRPatch"
+            $requiredInstallers += "IOSS"
         }
     }
 
     Write-Host "`n=== Downloading Installers ===" -ForegroundColor Cyan
 
-    foreach ($installer in $requiredInstallers) {
-        $path = Get-Installer -Name $installer.Name -FileName $installer.File
+    foreach ($installerName in $requiredInstallers) {
+        $path = Get-Installer -Name $installerName
         if ($path) {
-            $downloads[$installer.Name] = $path
+            $downloads[$installerName] = $path
         }
         else {
-            Write-Log "Missing required installer: $($installer.Name)" -Level Error
+            Write-Log "Missing required installer: $installerName" -Level Error
             return $null
         }
     }
@@ -456,10 +478,11 @@ function Get-RequiredInstallers {
 function Install-MSXML4 {
     param([string]$InstallerPath)
 
-    Write-Log "Installing MSXML 4.0 SP3..." -Level Info
+    Write-Log "Installing MSXML 4.0 SP3 Security Update..." -Level Info
 
-    $arguments = "/i `"$InstallerPath`" /qn /norestart"
-    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+    # Microsoft KB2758694 is a self-extracting exe, use /q for silent
+    $arguments = "/q /norestart"
+    $process = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
 
     if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
         Write-Log "MSXML 4.0 installed successfully" -Level Success
