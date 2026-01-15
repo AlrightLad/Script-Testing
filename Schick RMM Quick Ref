@@ -1,0 +1,155 @@
+# Schick Sensor Deployment - RMM Quick Reference
+
+## Backblaze B2 File Manifest (Confirmed)
+
+| File | URL | Purpose |
+|------|-----|---------|
+| **IOSS Autorun.exe** | `https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/IOSS_v3.2/IOSS_v3.2/Autorun.exe` | IOSS v3.2 installer |
+| **CDR Elite Setup.exe** | `https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/CDRElite5_16/CDRElite/CDR%20Elite%20Setup.exe` | Legacy USB 2.0 driver + DLLs |
+| **CDRPatch-2808.msi** | `https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/CDRElite5_16/CDRElite/Patch/CDRPatch-2808.msi` | CDRImageProcess.dll fix |
+| **AEUSBInterfaceSetup.exe** | `https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/AEUSBInterfaceSetup.exe` | USB 3.0 driver |
+| **AE USB Firmware** | `https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/AE_USB_Firmware_Upgrade%5B1%5D.exe` | USB 3.0 firmware updater |
+| **MSXML 4.0** | `https://download.microsoft.com/download/A/2/D/A2D8587D-0027-4217-9DAD-38AFDB0A177E/msxml.msi` | Microsoft (direct) |
+
+---
+
+## RMM Deployment Commands
+
+### Option 1: Full Auto-Detect
+```powershell
+# Download and execute - auto-detects Eaglesoft version
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$scriptUrl = "https://your-rmm-server/scripts/Deploy-SchickSensor.ps1"
+$scriptPath = "$env:TEMP\Deploy-SchickSensor.ps1"
+Invoke-WebRequest -Uri $scriptUrl -OutFile $scriptPath -UseBasicParsing
+& $scriptPath
+exit $LASTEXITCODE
+```
+
+### Option 2: Force Legacy Mode
+```powershell
+& $scriptPath -InstallMode Legacy -Verbose
+```
+
+### Option 3: Force IOSS Mode
+```powershell
+& $scriptPath -InstallMode IOSS -Verbose
+```
+
+### Option 4: Skip Prerequisites (if already handled)
+```powershell
+& $scriptPath -SkipPrerequisites
+```
+
+---
+
+## Exit Codes
+
+| Code | Meaning | RMM Action |
+|------|---------|------------|
+| 0 | Success | Mark complete |
+| 1 | General failure | Flag for review |
+| 3010 | Success, reboot required | Schedule reboot |
+
+---
+
+## Decision Logic Summary
+
+```
+Eaglesoft Version Check:
+├── >= 24.20 → IOSS Installation
+│   ├── Downloads: IOSS_Autorun.exe, CDR Elite Setup.exe, CDRPatch-2808.msi, MSXML4
+│   ├── Process: 
+│   │   1. Install CDR Elite (for DLLs)
+│   │   2. Clean Shared Files (preserve CDRData.dll + OMEGADLL.dll)
+│   │   3. Install CDR Patch
+│   │   4. Install IOSS
+│   │   5. Configure IOSS service
+│   └── WARNING: RDP acquisition NOT supported
+│
+└── < 24.20 → Legacy Installation
+    ├── Downloads: CDR Elite Setup.exe, CDRPatch-2808.msi, MSXML4, (AEUSBInterface if USB 3.0)
+    └── Process:
+        1. Install CDR Elite
+        2. Install CDR Patch
+        3. Install AE USB driver (if USB 3.0 detected)
+```
+
+---
+
+## DLL Confirmation
+
+**Verified:** CDR Elite Setup.exe installs these files to `C:\Program Files (x86)\Schick Technologies\Shared Files\`:
+
+- `CDRData.dll` ✓
+- `OMEGADLL.dll` ✓
+- `CDRImageProcess.dll` ✓ (patched by CDRPatch-2808.msi to version 5.15.1877.x)
+
+Source: Schick 33/Elite USB Interface Driver v5.16.484.10925 manifest
+
+---
+
+## Validation Checks
+
+### Legacy Installation
+- [ ] `C:\Program Files (x86)\Schick Technologies\Shared Files\` exists
+- [ ] `CDRData.dll` present
+- [ ] `OMEGADLL.dll` present
+- [ ] `CDRImageProcess.dll` version = 5.15.1877.x
+- [ ] MSXML 4.0 installed (registry key exists)
+- [ ] Core Isolation disabled
+
+### IOSS Installation
+- [ ] All Legacy checks above
+- [ ] `C:\Program Files\Sirona\Intraoral Sensors\` exists
+- [ ] Sirona Intraoral Sensor service running
+- [ ] Service set to Automatic (Delayed Start)
+- [ ] Service recovery = Restart on failure
+
+---
+
+## Log Locations
+
+| File | Path |
+|------|------|
+| Deployment Log | `C:\ProgramData\DTC\Logs\SchickDeploy_[timestamp].log` |
+| JSON Results | `C:\ProgramData\DTC\Logs\SchickDeploy_[timestamp].json` |
+| Working Directory | `C:\ProgramData\DTC\SchickDeploy\` |
+
+---
+
+## Pre-Flight Checklist (Manual Verification)
+
+Before running on production:
+
+1. **Eaglesoft version** - Is it 24.20+ (IOSS) or below (Legacy)?
+2. **RDP usage** - Does office use RDP for imaging workstations? (IOSS incompatible)
+3. **USB remote box type** - USB 2.0 or USB 3.0?
+4. **Backup status** - Is Eaglesoft database backed up?
+5. **User session** - Are all users logged out of Eaglesoft?
+
+---
+
+## Troubleshooting
+
+| Issue | Cause | Resolution |
+|-------|-------|------------|
+| IOSS service won't start | Prerequisites not loaded | Set to Delayed Start, reboot |
+| Sensor not detected | AutoDetect interference | Uninstall legacy CDR drivers |
+| CDRImageProcess.dll wrong version | Patch ran before MSXML | Re-run CDRPatch-2808.msi |
+| Silent install prompts | File not unblocked | Ensure `Unblock-File` ran |
+| Download fails | TLS 1.2 not enabled | Add `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12` |
+
+---
+
+## HALO Ticket Integration
+
+JSON output (`SchickDeploy_[timestamp].json`) contains:
+- Computer name
+- Install mode used
+- All step results
+- Validation results
+- Duration
+- Error messages (if any)
+
+Can be parsed for automatic ticket updates or reporting.
