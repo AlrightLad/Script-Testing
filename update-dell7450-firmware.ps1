@@ -9,6 +9,11 @@
     Requires: Dell OMSA installed, Administrator privileges
     Target Firmware: 1.4.0 A03
 #>
+param(
+    [switch]$AutoRestart,
+    [switch]$NoRestart,
+    [int]$InstallerTimeoutSeconds = 600
+)
 
 # Configuration
 $TargetFirmwareVersion = "1.4.0"
@@ -24,7 +29,7 @@ $LogFile = "$TempPath\firmware_update.log"
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "[$timestamp] [$Level] $Message"
+    $logEntry = "[$timestamp] [$Level] [$Description] $Message"
     Write-Host $logEntry
     Add-Content -Path $LogFile -Value $logEntry -ErrorAction SilentlyContinue
 }
