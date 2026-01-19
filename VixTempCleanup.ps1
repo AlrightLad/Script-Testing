@@ -18,7 +18,13 @@
 #>
 
 #region Version
-$ScriptVersion = "1.1.0"
+$ScriptVersion = "1.1.1"
+#endregion
+
+#region Assembly Loading
+# Load compression assembly at script start (required for ZIP operations)
+# Must be loaded before function definitions to resolve types during parsing
+Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
 #endregion
 
 ## ============================================================================
@@ -255,8 +261,6 @@ function New-VixTempArchive {
         [string]$ArchivePath,
         [string]$SourceRoot
     )
-
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
 
     $zip = $null
     try {
