@@ -18,13 +18,7 @@
 #>
 
 #region Version
-$ScriptVersion = "1.1.1"
-#endregion
-
-#region Assembly Loading
-# Load compression assembly at script start (required for ZIP operations)
-# Must be loaded before function definitions to resolve types during parsing
-Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+$ScriptVersion = "1.1.2"
 #endregion
 
 ## ============================================================================
@@ -262,41 +256,35 @@ function New-VixTempArchive {
         [string]$SourceRoot
     )
 
-    $zip = $null
     try {
-        $zip = [System.IO.Compression.ZipFile]::Open(
-            $ArchivePath,
-            [System.IO.Compression.ZipArchiveMode]::Create
-        )
-
-        $archivedCount = 0
         $archivedFiles = @()
         $originalSizeBytes = 0
+        $filePaths = @()
 
         foreach ($file in $Files) {
             try {
-                # Preserve relative path structure in archive
-                $relativePath = $file.FullName.Substring($SourceRoot.Length).TrimStart('\')
-
-                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-                    $zip,
-                    $file.FullName,
-                    $relativePath,
-                    [System.IO.Compression.CompressionLevel]::Optimal
-                ) | Out-Null
-
-                $archivedCount++
+                # Test if file is accessible
+                $null = [System.IO.File]::OpenRead($file.FullName).Close()
+                $filePaths += $file.FullName
                 $archivedFiles += $file
                 $originalSizeBytes += $file.Length
             }
             catch {
-                Write-Log "[WARN] Could not archive file: $($file.FullName) - $_" -Level WARN
-                # Continue with other files
+                Write-Log "[WARN] Could not access file (skipping): $($file.FullName) - $_" -Level WARN
             }
         }
 
-        $zip.Dispose()
-        $zip = $null
+        if ($filePaths.Count -eq 0) {
+            return @{
+                Success = $false
+                Error = "No files were accessible for archiving"
+            }
+        }
+
+        # Use Compress-Archive cmdlet (built into PowerShell 5.0+)
+        # Note: Compress-Archive doesn't preserve folder structure from different paths,
+        # but since all files are in C:\vixtemp, this is acceptable
+        Compress-Archive -Path $filePaths -DestinationPath $ArchivePath -CompressionLevel Optimal -Force -ErrorAction Stop
 
         # Get compressed size
         $compressedSizeBytes = 0
@@ -306,7 +294,7 @@ function New-VixTempArchive {
 
         return @{
             Success = $true
-            ArchivedCount = $archivedCount
+            ArchivedCount = $archivedFiles.Count
             ArchivedFiles = $archivedFiles
             ArchivePath = $ArchivePath
             OriginalSizeBytes = $originalSizeBytes
@@ -314,9 +302,6 @@ function New-VixTempArchive {
         }
     }
     catch {
-        if ($zip) {
-            $zip.Dispose()
-        }
         if (Test-Path $ArchivePath) {
             Remove-Item $ArchivePath -Force -ErrorAction SilentlyContinue
         }
