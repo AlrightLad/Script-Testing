@@ -113,41 +113,40 @@ function Write-VerboseLog {
 # LOG FILE MANAGEMENT (Section 14)
 # ============================================================================
 function Save-LogFile {
+    $Script:LOG_PRUNE_THRESHOLD_KB = 256
+
     try {
-        $existingLines = @()
-        if (Test-Path $Script:LOG_FILE) {
-            $existingLines = @(Get-Content -Path $Script:LOG_FILE -ErrorAction SilentlyContinue)
+        # Append new entries (fast path - no read required)
+        if ($Script:LogBuffer.Count -gt 0) {
+            $Script:LogBuffer | Add-Content -Path $Script:LOG_FILE -Encoding UTF8 -ErrorAction Stop
         }
 
-        # Prune entries older than 90 days
-        $cutoff = (Get-Date).AddDays(-$Script:LOG_RETENTION_DAYS)
-        $prunedLines = [System.Collections.ArrayList]::new()
-        $removedCount = 0
+        # Prune only when file exceeds size threshold to avoid read-rewrite on every run
+        $fileInfo = Get-Item $Script:LOG_FILE -ErrorAction SilentlyContinue
+        if ($fileInfo -and ($fileInfo.Length / 1KB) -gt $Script:LOG_PRUNE_THRESHOLD_KB) {
+            $cutoff = (Get-Date).AddDays(-$Script:LOG_RETENTION_DAYS)
+            $existingLines = @(Get-Content -Path $Script:LOG_FILE -ErrorAction Stop)
+            $prunedLines = [System.Collections.ArrayList]::new()
+            $removedCount = 0
 
-        foreach ($line in $existingLines) {
-            if ($line -match '^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
-                $parsedDate = $null
-                if ([DateTime]::TryParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss", $null, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate)) {
-                    if ($parsedDate -lt $cutoff) {
-                        $removedCount++
-                        continue
+            foreach ($line in $existingLines) {
+                if ($line -match '^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') {
+                    $parsedDate = $null
+                    if ([DateTime]::TryParseExact($Matches[1], "yyyy-MM-dd HH:mm:ss", $null, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate)) {
+                        if ($parsedDate -lt $cutoff) {
+                            $removedCount++
+                            continue
+                        }
                     }
                 }
+                [void]$prunedLines.Add($line)
             }
-            # Keep line if timestamp unparseable or within retention
-            [void]$prunedLines.Add($line)
-        }
 
-        if ($removedCount -gt 0) {
-            Write-VerboseLog "Log file pruning: $removedCount entries removed (older than $($Script:LOG_RETENTION_DAYS) days)"
+            if ($removedCount -gt 0) {
+                $prunedLines | Set-Content -Path $Script:LOG_FILE -Encoding UTF8 -ErrorAction Stop
+                Write-VerboseLog "Log file pruning: $removedCount entries removed (older than $($Script:LOG_RETENTION_DAYS) days)"
+            }
         }
-
-        # Append new entries
-        foreach ($line in $Script:LogBuffer) {
-            [void]$prunedLines.Add($line)
-        }
-
-        $prunedLines | Set-Content -Path $Script:LOG_FILE -Encoding UTF8 -ErrorAction Stop
     }
     catch {
         Write-Host "$(Get-TimestampString) ERROR: Failed to write log file: $_"
@@ -341,8 +340,20 @@ function Save-History {
     $tempFile = $Script:HISTORY_FILE + ".tmp"
 
     try {
-        $History | ConvertTo-Json -Depth 10 | Set-Content -Path $tempFile -Encoding UTF8 -ErrorAction Stop
-        Move-Item -Path $tempFile -Destination $Script:HISTORY_FILE -Force -ErrorAction Stop
+        $jsonOutput = $History | ConvertTo-Json -Depth 10
+        $jsonOutput | Set-Content -Path $tempFile -Encoding UTF8 -ErrorAction Stop
+
+        try {
+            Move-Item -Path $tempFile -Destination $Script:HISTORY_FILE -Force -ErrorAction Stop
+        }
+        catch {
+            # Move failed - fall back to direct write so new data isn't lost
+            Write-VerboseLog "Atomic rename failed, falling back to direct write: $_"
+            $jsonOutput | Set-Content -Path $Script:HISTORY_FILE -Encoding UTF8 -ErrorAction Stop
+            if (Test-Path $tempFile) {
+                Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+            }
+        }
 
         $totalPoints = 0
         $driveCount = 0
