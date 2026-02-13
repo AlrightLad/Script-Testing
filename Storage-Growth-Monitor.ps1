@@ -184,18 +184,15 @@ function New-EmptyHistory {
     }
 }
 
-function Import-HistoryFromFile {
+function ConvertFrom-HistoryJson {
     <#
     .SYNOPSIS
-        Attempts to parse a history JSON file. Returns $null on failure.
+        Parses raw JSON content into a history hashtable. Returns $null on failure.
     #>
-    param([string]$FilePath)
-
-    if (-not (Test-Path $FilePath)) { return $null }
+    param([string]$JsonContent, [string]$SourceLabel = "unknown")
 
     try {
-        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8 -ErrorAction Stop
-        $data = $content | ConvertFrom-Json -ErrorAction Stop
+        $data = $JsonContent | ConvertFrom-Json -ErrorAction Stop
 
         if (-not $data.version -or -not $data.drives) {
             throw "Invalid JSON structure - missing version or drives"
@@ -239,7 +236,26 @@ function Import-HistoryFromFile {
         return $history
     }
     catch {
-        Write-VerboseLog "Import-HistoryFromFile: Failed to parse '$FilePath': $_"
+        Write-VerboseLog "ConvertFrom-HistoryJson: Failed to parse content from $SourceLabel`: $_"
+        return $null
+    }
+}
+
+function Import-HistoryFromFile {
+    <#
+    .SYNOPSIS
+        Reads a history JSON file from disk and parses it. Returns $null on failure.
+    #>
+    param([string]$FilePath)
+
+    if (-not (Test-Path $FilePath)) { return $null }
+
+    try {
+        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8 -ErrorAction Stop
+        return ConvertFrom-HistoryJson -JsonContent $content -SourceLabel $FilePath
+    }
+    catch {
+        Write-VerboseLog "Import-HistoryFromFile: Failed to read '$FilePath': $_"
         return $null
     }
 }
@@ -273,7 +289,7 @@ function Load-History {
 
     # If I/O succeeded, attempt parse (no retry - parse errors are not transient)
     if ($null -ne $content) {
-        $result = Import-HistoryFromFile -FilePath $Script:HISTORY_FILE
+        $result = ConvertFrom-HistoryJson -JsonContent $content -SourceLabel $Script:HISTORY_FILE
         if ($null -ne $result) {
             return $result
         }
@@ -1140,7 +1156,7 @@ function Main {
         Write-Log "Preserving existing data, skipping collection."
         Save-History -History $history
         Save-LogFile
-        exit 0
+        exit 2
     }
 
     if ($currentDrives.Count -eq 0) {
