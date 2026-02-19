@@ -383,8 +383,16 @@ function Test-Prerequisites {
         ForEach-Object { $_.Key }
     if ($missingHashes.Count -gt 0) {
         $hashList = $missingHashes -join ', '
-        $checks += @{ Name = "SHA256 Hashes"; Status = "WARN"; Message = "Missing for: $hashList - downloads will not be integrity-verified" }
-        Write-Log "WARNING: SHA256 hashes not configured for: $hashList. Run Get-FileHash on verified installers to populate." -Level Warning
+        if ($DownloadOnly) {
+            # Allow download-only mode so operators can retrieve files and compute hashes
+            $checks += @{ Name = "SHA256 Hashes"; Status = "WARN"; Message = "Missing for: $hashList - use -DownloadOnly then Get-FileHash to populate" }
+            Write-Log "SHA256 hashes not configured for: $hashList. Download-only mode permitted to generate hashes." -Level Warning
+        }
+        else {
+            $checks += @{ Name = "SHA256 Hashes"; Status = "FAIL"; Message = "Missing for: $hashList - downloads cannot be integrity-verified" }
+            Write-Log "SHA256 hashes not configured for: $hashList. Run with -DownloadOnly first, then use Get-FileHash to populate config." -Level Error
+            $passed = $false
+        }
     }
     else {
         $checks += @{ Name = "SHA256 Hashes"; Status = "PASS"; Message = "All installer hashes configured" }
@@ -997,6 +1005,7 @@ function Set-IOSSServiceConfiguration {
         }
         else {
             Write-Log "  Failed to set recovery options (exit code: $LASTEXITCODE)" -Level Warning
+            $configSuccess = $false
         }
 
         # Ensure running as Local System
