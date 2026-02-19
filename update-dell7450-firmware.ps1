@@ -30,11 +30,11 @@ $BackblazeBaseUrl = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vend
 $FirmwareFiles = @{
     "RI" = @{
         FileName = "Express-Flash-PCIe-SSD_Firmware_JHKXR_WN64_1.4.0_A03_01.EXE"
-        SHA256   = "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8S9T0U1V2W3X4Y5Z6A7B8C9D0E1F2"  # TODO: Replace with actual hash
+        SHA256   = "67B7F289CB942A094F6EE9F4501A8E225F3D745C9E102EEC3C4B8698129DD4FA"
     }
     "MU" = @{
         FileName = "Express-Flash-PCIe-SSD_Firmware_JHKXR_WN64_1.4.0_A03_01.EXE"
-        SHA256   = "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R8S9T0U1V2W3X4Y5Z6A7B8C9D0E1F2"  # TODO: Replace with actual hash
+        SHA256   = "67B7F289CB942A094F6EE9F4501A8E225F3D745C9E102EEC3C4B8698129DD4FA"
     }
 }
 $TempPath = "$env:TEMP\Dell7450Firmware"
