@@ -71,27 +71,28 @@ $Script:Config = @{
         CDRElite      = @{
             Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/CDRElite5_16/CDRElite/CDR%20Elite%20Setup.exe"
             FileName = "CDR Elite Setup.exe"
-            SHA256   = $null  # ACTION REQUIRED: Populate from verified download
+            SHA256   = "C4CA8729EFBAAD03EFE58C52398B0EC8FF5A6BD50F999672D5F700C999F9DD31"
         }
         CDRPatch      = @{
             Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/CDRElite5_16/CDRElite/Patch/CDRPatch-2808.msi"
             FileName = "CDRPatch-2808.msi"
-            SHA256   = $null  # ACTION REQUIRED: Populate from verified download
+            SHA256   = "1E2F4B768AFD485F730F3F74D98996B80C761A2D0F676097573B15AB414E4148"
         }
         AEUSBDriver   = @{
             Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/AEUSBInterfaceSetup.exe"
             FileName = "AEUSBInterfaceSetup.exe"
-            SHA256   = $null  # ACTION REQUIRED: Populate from verified download
+            SHA256   = "C74779873D125EF6175D00AD52FA07277535F89D6415CC7207D76AA120D545A5"
         }
         IOSS          = @{
             Url      = "https://s3.us-west-002.backblazeb2.com/public-dtc/repo/vendors/Patterson-Eaglesoft/IOSS_v3.2/IOSS_v3.2/Autorun.exe"
             FileName = "IOSS_Autorun.exe"
-            SHA256   = $null  # ACTION REQUIRED: Populate from verified download
+            SHA256   = "9A3C29D60EF7BF8076E6BF94E5B4D8659A5C730F5B87D61C84A55BF9E293249A"
         }
         MSXML4        = @{
-            Url      = "https://download.microsoft.com/download/1/E/E/1EE06E22-A56F-4E76-B6F6-E7670B4F8163/msxml4-KB2758694-enu.exe"
+            # Updated URL - previous /download/1/E/E/... path returns 404
+            Url      = "https://download.microsoft.com/download/a/7/6/a7611ffc-4f68-4fb1-a931-95882ec013fc/msxml4-KB2758694-enu.exe"
             FileName = "msxml4-KB2758694-enu.exe"
-            SHA256   = $null  # ACTION REQUIRED: Populate from verified download
+            SHA256   = $null  # ACTION REQUIRED: Run Get-FileHash after downloading from updated URL above
         }
     }
 
