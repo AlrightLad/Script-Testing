@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "version": "1.0",
+    "last_updated": "2026-02-19",
+    "description": "DTC infrastructure standards for network assessment gap analysis"
+  },
+  "firewall": {
+    "standard": "UniFi Dream Machine (UDM)",
+    "gap_flags": ["SonicWall", "Meraki", "Fortinet", "pfSense", "Netgear", "Linksys", "TP-Link", "consumer router"],
+    "sow_item": "Firewall replacement — deploy UDM"
+  },
+  "dns": {
+    "standard": "UDM gateway IP as sole DNS server on all endpoints",
+    "gap_condition": "Any DNS server configured that is not the default gateway or 127.0.0.1",
+    "sow_item": "DNS reconfiguration — set UDM as sole DNS"
+  },
+  "rmm": {
+    "standard": "NinjaOne agent installed and checking in",
+    "gap_flags_present": ["ConnectWise", "LabTech", "Datto RMM", "Autotask"],
+    "gap_if_missing": "NinjaOne",
+    "sow_item": "RMM deployment — install NinjaOne, remove competing agents"
+  },
+  "backup": {
+    "standard": "Veeam BDR deployed by DTC (Day 1)",
+    "gap_if_missing": "Veeam",
+    "note": "Existing backup software documented for reference. DTC deploys Veeam BDR during onboarding regardless of current solution.",
+    "sow_item": "Backup — deploy Veeam BDR appliance"
+  },
+  "antivirus": {
+    "standard": "DTC-managed endpoint protection via NinjaOne",
+    "gap_flags": ["Norton", "McAfee", "AVG", "Avast", "Kaspersky", "Bitdefender consumer"],
+    "sow_item": "AV cleanup — remove consumer AV, deploy managed protection"
+  },
+  "domain": {
+    "standard": "Windows Active Directory domain-joined",
+    "gap_condition": "Workgroup configuration detected",
+    "sow_item": "Domain deployment — build AD domain, join all endpoints"
+  },
+  "local_admin": {
+    "standard": "DTCADMIN local admin account with LAPS via NinjaRMM",
+    "gap_if_missing": "DTCADMIN",
+    "sow_item": "Local admin standardization — create DTCADMIN, deploy LAPS"
+  },
+  "printers": {
+    "standard": "Centralized via Print Server + GPO deployment",
+    "gap_condition": "Direct IP printer connections on workstations",
+    "sow_item": "Printer centralization — configure print server, deploy via GPO"
+  },
+  "disk_health": {
+    "warning_threshold_percent": 80,
+    "critical_threshold_percent": 90,
+    "sow_item": "Disk remediation — cleanup or drive replacement"
+  },
+  "windows_installer": {
+    "warning_threshold_gb": 20,
+    "critical_threshold_gb": 50,
+    "reference": "HALO Ticket 1125653 — orphaned .msp patch accumulation",
+    "sow_item": "Installer cleanup — orphaned patch remediation"
+  },
+  "stale_accounts": {
+    "days_inactive": 90,
+    "sow_item": "AD cleanup — disable stale accounts, audit group memberships"
+  },
+  "domain_admins": {
+    "max_count": 3,
+    "sow_item": "Privilege audit — reduce Domain Admins membership"
+  },
+  "os_versions": {
+    "server_supported": ["Windows Server 2019", "Windows Server 2022", "Windows Server 2025"],
+    "server_eol": ["Windows Server 2012", "Windows Server 2012 R2", "Windows Server 2016"],
+    "workstation_supported": ["Windows 10 22H2", "Windows 11 23H2", "Windows 11 24H2"],
+    "workstation_eol": ["Windows 10 21H2", "Windows 10 21H1", "Windows 8.1", "Windows 7"],
+    "sow_item": "OS upgrade — migrate unsupported endpoints"
+  }
+}
