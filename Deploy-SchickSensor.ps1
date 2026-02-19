@@ -92,7 +92,7 @@ $Script:Config = @{
             # Updated URL - previous /download/1/E/E/... path returns 404
             Url      = "https://download.microsoft.com/download/a/7/6/a7611ffc-4f68-4fb1-a931-95882ec013fc/msxml4-KB2758694-enu.exe"
             FileName = "msxml4-KB2758694-enu.exe"
-            SHA256   = $null  # ACTION REQUIRED: Run Get-FileHash after downloading from updated URL above
+            SHA256   = "52D80E6E7BA94437199A2E6B51F00C7F483269C02BEDEC2253C4602F5209B31B"
         }
     }
 
