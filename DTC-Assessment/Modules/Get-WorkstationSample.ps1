@@ -149,7 +149,8 @@ function Get-WorkstationSample {
 
                 # Windows Installer folder size
                 try {
-                    $installerSize = (Get-ChildItem "C:\Windows\Installer" -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                    $measureResult = (Get-ChildItem "C:\Windows\Installer" -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum)
+                    $installerSize = if ($measureResult.Sum) { $measureResult.Sum } else { 0 }
                     $data.InstallerFolderGB = [math]::Round($installerSize / 1GB, 2)
                 }
                 catch {

@@ -160,7 +160,8 @@ function Get-ServerInfo {
     try {
         $installerPath = "C:\Windows\Installer"
         if (Test-Path $installerPath) {
-            $installerSize = (Get-ChildItem $installerPath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            $measureResult = (Get-ChildItem $installerPath -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum)
+            $installerSize = if ($measureResult.Sum) { $measureResult.Sum } else { 0 }
             $result.InstallerFolderGB = [math]::Round($installerSize / 1GB, 2)
         }
         else {
@@ -175,7 +176,9 @@ function Get-ServerInfo {
 
     # Recent hotfixes
     try {
-        $hotfixes = Get-HotFix -ErrorAction Stop | Sort-Object InstalledOn -Descending -ErrorAction SilentlyContinue | Select-Object -First 5
+        $hotfixes = Get-HotFix -ErrorAction Stop |
+            Sort-Object @{Expression = { if ($_.InstalledOn) { $_.InstalledOn } else { [datetime]::MinValue } }; Descending = $true} |
+            Select-Object -First 5
         $result.RecentHotfixes = @()
         foreach ($hf in $hotfixes) {
             $result.RecentHotfixes += @{

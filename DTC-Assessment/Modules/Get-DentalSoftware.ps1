@@ -7,6 +7,9 @@ function Get-DentalSoftware {
         dental software patterns including practice management systems, imaging platforms,
         imaging drivers, VoIP, backup, RMM/security, and dental utilities. Also queries
         Windows Defender status separately.
+    .NOTES
+        This function takes no parameters. All detection patterns are defined internally
+        for easy maintenance. Uses CmdletBinding for -Verbose support.
     .EXAMPLE
         $dentalData = Get-DentalSoftware
     #>
