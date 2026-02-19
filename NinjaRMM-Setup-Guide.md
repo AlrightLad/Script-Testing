@@ -77,6 +77,22 @@ Under **Conditions:**
 - **Notification:** Email DTC engineering
 - **Ticket:** Create HALO ticket
 
+## Event ID Reference
+
+The monitor writes to the `Application` event log under source `DTC-InstallerMonitor`.
+The cleanup script writes Event ID `1001` (Information) on completion.
+
+| Event ID | Status | Entry Type | Description |
+|----------|--------|------------|-------------|
+| 1000 | Healthy | Information | Installer folder below warning threshold |
+| 1001 | — | Information | Cleanup script completed successfully |
+| 2000 | Warning | Warning | Installer folder >= warning threshold |
+| 2500 | Critical | Error | Installer folder >= critical threshold |
+| 3000 | Error | Error | Scan failure or critical error |
+
+SIEM rules should target each Event ID independently — they are intentionally distinct
+so filters can differentiate Warning from Critical severity.
+
 ## 5. AV Exclusion
 
 Add to antivirus exclusion policy:

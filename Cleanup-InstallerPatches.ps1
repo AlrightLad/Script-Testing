@@ -46,6 +46,7 @@ $CriticalThresholdGB    = 50    # Total Installer folder size >= this = "Critica
 $AutoForceThresholdPct  = 10    # Free disk % below which Force mode auto-enables
 $PatchCacheThresholdGB  = 1     # $PatchCache$ size above which cleanup is triggered
 $DismTimeoutMinutes     = 60    # Max minutes to wait for DISM before continuing
+$CleanupBasePath        = "C:\DTC\InstallerCleanup"  # Root for quarantine, logs, and working data
 
 # ============================================================================
 # SHARED FUNCTION: Get-OrphanedInstallerFiles
@@ -91,6 +92,8 @@ function Get-OrphanedInstallerFiles {
     # reference files in C:\Windows\Installer. Missing per-user SIDs inflates orphan counts.
     #
     # LocalPackage values contain standard file paths — no GUID decompression needed.
+    # Test-Path is intentionally omitted: the HashSet is only compared against Get-ChildItem
+    # output (guaranteed-existing files), so stale registry paths are harmless dead weight.
 
     $referencedFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
@@ -114,7 +117,7 @@ function Get-OrphanedInstallerFiles {
                         $installProps = Join-Path $product.PSPath "InstallProperties"
                         if (Test-Path $installProps) {
                             $localPackage = (Get-ItemProperty $installProps -Name "LocalPackage" -ErrorAction SilentlyContinue).LocalPackage
-                            if ($localPackage -and (Test-Path $localPackage)) {
+                            if ($localPackage) {
                                 [void]$referencedFiles.Add($localPackage)
                             }
                         }
@@ -134,7 +137,7 @@ function Get-OrphanedInstallerFiles {
                 foreach ($patch in (Get-ChildItem $patchesPath -ErrorAction Stop)) {
                     try {
                         $localPackage = (Get-ItemProperty $patch.PSPath -Name "LocalPackage" -ErrorAction SilentlyContinue).LocalPackage
-                        if ($localPackage -and (Test-Path $localPackage)) {
+                        if ($localPackage) {
                             [void]$referencedFiles.Add($localPackage)
                         }
                     } catch {
@@ -307,9 +310,11 @@ Write-Output ""
 
 # Include time in quarantine folder name to prevent same-day collision (Move-Item -Force
 # would silently overwrite a previously quarantined file with the same name)
-$quarantinePath = "C:\DTC\InstallerCleanup\Quarantine\$(Get-Date -Format 'yyyy-MM-dd_HHmmss')"
-$logPath = "C:\DTC\InstallerCleanup\Logs"
-$logFile = Join-Path $logPath "cleanup_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').log"
+$quarantineRoot = Join-Path $CleanupBasePath "Quarantine"
+$logPath = Join-Path $CleanupBasePath "Logs"
+$runTimestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+$quarantinePath = Join-Path $quarantineRoot $runTimestamp
+$logFile = Join-Path $logPath "cleanup_$runTimestamp.log"
 
 # Create directories — abort on failure so we don't silently lose files
 if (-not $WhatIf) {
@@ -378,7 +383,7 @@ Write-Output ""
 # ============================================================================
 # PHASE 3: $PatchCache$ Cleanup
 # ============================================================================
-$patchCachePath = Join-Path $installerBasePath "`$PatchCache`$"
+$patchCachePath = Join-Path $installerBasePath '$PatchCache$'
 if (Test-Path $patchCachePath) {
     $patchCacheSize = (Get-ChildItem $patchCachePath -Recurse -Force -ErrorAction SilentlyContinue |
         Measure-Object Length -Sum).Sum -as [long]
@@ -415,7 +420,6 @@ Write-Output ""
 # ============================================================================
 # PHASE 4: Quarantine Maintenance
 # ============================================================================
-$quarantineRoot = "C:\DTC\InstallerCleanup\Quarantine"
 if (Test-Path $quarantineRoot) {
     $cutoffDate = (Get-Date).AddDays(-$QuarantineDays)
     # Parse creation timestamp from folder name (yyyy-MM-dd_HHmmss) instead of relying on
@@ -535,7 +539,7 @@ Write-Output "Mode: $(if ($WhatIf) {'WhatIf (no changes made)'} elseif ($Force) 
 Write-Output "Orphaned files found: $($results.OrphanedCount)"
 Write-Output "Installer folder freed: $installerFolderFreedGB GB"
 if (-not $Force -and -not $WhatIf) {
-    Write-Output "  (files quarantined to C:\DTC — disk space freed when quarantine expires in $QuarantineDays days)"
+    Write-Output "  (files quarantined to $quarantineRoot — disk space freed when quarantine expires in $QuarantineDays days)"
 }
 Write-Output "Disk space recovered: $diskSpaceRecoveredGB GB"
 if (-not $WhatIf) {
